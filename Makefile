@@ -1,18 +1,11 @@
-CC	= gcc
-CFLAGS	= -Wall
-SV	= server.o
-SB	= subscriber.o
-TARGETSV= server
-TARGETSB= subscriber
-
-all: $(TARGETSV) $(TARGETSB)
-
-$(TARGETSV): $(SV)
-	$(CC) $(CFLAGS) -o $(TARGETSV) $(SV)
-
-$(TARGETSB): $(SB)
-	$(CC) $(CFLAGS) -o $(TARGETSB) $(SB)
+build:
+	gcc -Wall server.c -c
+	gcc -Wall subscriber.c -c
+	gcc -Wall helpers.c -c
+	gcc -Wall server.o helpers.o -o server
+	gcc -Wall subscriber.o helpers.o -o subscriber
 
 clean:
-	rm -f $(SV) $(TARGETSV)
-	rm -f $(SB) $(TARGETSB)
+	rm -f *.o
+	rm -f server
+	rm -f subscriber
