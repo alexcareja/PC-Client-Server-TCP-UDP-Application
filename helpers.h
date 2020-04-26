@@ -3,6 +3,8 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
+#include <netinet/in.h>
 
 /*
  * Macro de verificare a erorilor
@@ -24,20 +26,36 @@
 #define TOPIC_LEN 50
 #define MAX_PAYLOAD_SIZE 1500
 #define MAX_STRING_LEN 1500
-#define INT 0
-#define SHORT_REAL 1
-#define FLOAT 2
-#define STRING 3
+#define TINT 0
+#define TSHORT_REAL 1
+#define TFLOAT 2
+#define TSTRING 3
 #define MAX_CLIENTS 250
 #define MAX_TOPICS 250
 #define BUFLEN 10
 #define ID_LEN 10
+#define FLOAT_LEN 6
+#define SHORT_REAL_LEN 2
+#define INT_LEN 5
+#define MAX_SAVED 100
 
 typedef struct udp_message {
 	char topic[TOPIC_LEN];
-	char data_type;
+	uint8_t data_type;
 	char payload[MAX_PAYLOAD_SIZE];
 } udp_message;
+
+typedef struct tcp_header {
+	int len;
+	struct sockaddr_in udp_client;
+} tcp_header;
+
+typedef struct tcp_message {
+	tcp_header header;
+	char topic[TOPIC_LEN];
+	char data_type;
+	char payload[MAX_PAYLOAD_SIZE];
+} tcp_message;
 
 typedef struct subscribe_message {
 	char subscribe;
@@ -45,15 +63,12 @@ typedef struct subscribe_message {
 	char SF;
 } subscribe_message;
 
-typedef struct subsList {
-	char topic[TOPIC_LEN];
-	struct subsList *next;
-} subsList;
-
 typedef struct tcpClient {
 	int sockfd;
 	char id[ID_LEN];
 	int status;
+	tcp_message *saved;
+	int no_saved;
 } tcpClient;
 
 typedef struct cliList {
@@ -77,19 +92,23 @@ typedef struct topicDB {
 	int size;
 } topicDB;
 
-subsList *createNode(char *);
-subsList *removeTopic(subsList *, char *);
-int findTopic(subsList *, char *);
-
 cliList *createCliList();
 int connectClient(cliList **, int, char *);
 char *getClientId(cliList *, int);
 int getClientFD(cliList *, char *);
 int isClientOnline(cliList *, char *);
+void storeMessage(cliList *, char *, tcp_message *);
+tcp_message *getSaved(cliList *, char *);
+int getSavedCount(cliList *, char *);
 void logoutClient(cliList *, int);
 void destroyCliList(cliList *);
 
 topicDB *initTDB();
 int subscribe(topicDB *, char *, char *, int);
 int unsubscribe(topicDB *, char *, char *);
+follower *getSubscribers(topicDB *, char *);
+int getSubscribersCount(topicDB *, char *);
+void destroyTDB(topicDB *);
+
+void printMessage(tcp_message);
 #endif
