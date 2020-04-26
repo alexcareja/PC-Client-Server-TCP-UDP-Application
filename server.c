@@ -9,15 +9,16 @@
 #include <arpa/inet.h>
 #include <netdb.h>
 #include "helpers.h"
+#include <stdint.h>
 
 int main(int argc, char const *argv[])
 {
-	int i, j, n, ret;
+	int i, j, n, ret, size;
 	int sockfd, udp_sockfd, newsockfd, port_number;
 	char buffer[BUFLEN];
 	udp_message m;
 	subscribe_message sm;
-	char **client = (char **) malloc(MAX_CLIENTS * sizeof(char *));
+	tcp_message tm;
 	struct sockaddr_in serv_addr, client_addr;
 	socklen_t clilen;
 	cliList *clients = createCliList();
@@ -28,6 +29,7 @@ int main(int argc, char const *argv[])
 	fd_set tmp_fds;		// multimea temporara
 	int fdmax;			// valoare maxima fd in read_fds
 
+	// initializare cu nultimea vida
 	FD_ZERO(&read_fds);
 	FD_ZERO(&tmp_fds);
 
@@ -67,7 +69,7 @@ int main(int argc, char const *argv[])
 
 	while (1) {
 		tmp_fds = read_fds; 
-		
+
 		ret = select(fdmax + 1, &tmp_fds, NULL, NULL, NULL);
 		DIE(ret < 0, "select");
 		if (FD_ISSET(0, &tmp_fds)) {
@@ -75,13 +77,16 @@ int main(int argc, char const *argv[])
 			memset(buffer, 0, BUFLEN);
 			fgets(buffer, sizeof(buffer), stdin);
 			if (strncmp(buffer, "exit", 4) == 0) { // exit -> deconectare
-				for (i = 0; i <= fdmax; i++) {
+				for (i = 0; i <= fdmax; i++) {	// inchide socketii deschisi
 					if (FD_ISSET(i, &read_fds)) {
 						close(i);
 					}
 				}
 				break;
 			}
+			// daca s-a introdus alta comanda in afara de exit
+			printf("Pentru a inchide serverul, introduceti comanda 'exit'\n");
+			continue;
 		}
 		for (i = 0; i <= fdmax; i++) {
 			if (FD_ISSET(i, &tmp_fds)) {
@@ -96,10 +101,11 @@ int main(int argc, char const *argv[])
 					if (newsockfd > fdmax) { 
 						fdmax = newsockfd;
 					}
-					client[newsockfd] = (char *) calloc(BUFLEN, sizeof(char));
+					// asteapta mesajul cu id-ul clientului
 					memset(buffer, 0, BUFLEN);
 					n = recv(newsockfd, buffer, BUFLEN, 0);
 					DIE(n < 0, "recv");
+					// adauga clientul in lita de clienti
 					ret = connectClient(&clients, newsockfd, buffer);
 					if (ret >= 0) {
 						printf("New client %s connected from %s:%d.\n", buffer,
@@ -108,11 +114,26 @@ int main(int argc, char const *argv[])
 						n = send(newsockfd, buffer, BUFLEN, 0);
 						DIE(n < 0, "send");
 						if (ret == 2) {
-							// verifica daca clientul care s-a reconectat are vreun mesaj de primit
-
+							// Clientul s-a reconectat si ii trimit toate mesajele salvate pentru el
+							// obtine mesajele in asteptare ale clientului
+							tcp_message *mlist = getSaved(clients, getClientId(clients, newsockfd));
+							int count = getSavedCount(clients, getClientId(clients, newsockfd));
+							for (j = 0; j < count; j++) {
+								memset(&tm, 0, sizeof(tcp_message));
+								memcpy(&(tm), &(mlist[j]), sizeof(tcp_message));
+								size = tm.header.len + sizeof(struct sockaddr_in) + sizeof(int);
+								n = send(newsockfd, &tm, size, 0);
+								DIE(n < 0, "send");
+							}
+							if (mlist != NULL) {
+								// elibereaza memoria anterior alocata pentru mesajele on hold
+								free(mlist);
+							}
 						}
 						
 					} else {
+						// daca a returnat < 0, atunci exista deja acest id, iar
+						// utilizatorul respectiv este conectat
 						strcpy(buffer, "existing");
 						n = send(newsockfd, buffer, BUFLEN, 0);
 						DIE(n < 0, "send");
@@ -123,13 +144,52 @@ int main(int argc, char const *argv[])
 				if (i == udp_sockfd) {
 					// a venit o cerere de conexiune pentru UDP pe care serverul o accepta
 					// s-au primit date de pe unul din socketii UDP
-					// si serverul va redirectiona datele catre abonatii 
-					// TODO trimite si date despre sursa UDP in mesaj
+					// si serverul va redirectiona datele catre abonatii
 					clilen = sizeof(client_addr);
+					memset(&m, 0, sizeof(m));
 					n = recvfrom(udp_sockfd, &m, sizeof(m), 0,
 						(struct sockaddr *) &client_addr, &clilen);
-					printf("topic: %s\npayload: %s\nlen: %ld\n\n", m.topic, m.payload, strlen(m.payload));
 					DIE(n < 0, "recvfrom");
+					memset(&tm, 0, sizeof(tcp_message));
+					memcpy(&(tm.header.udp_client), &client_addr, clilen);
+					// updateaa len in functie de tipul mesajului
+					switch(m.data_type) {
+						case TSTRING:
+							tm.header.len = strlen(m.payload) + TOPIC_LEN + 1;
+							break;
+						case TFLOAT:
+							tm.header.len = FLOAT_LEN + TOPIC_LEN + 1;
+							break;
+						case TSHORT_REAL:
+							tm.header.len = SHORT_REAL_LEN + TOPIC_LEN + 1;
+							break;
+						case TINT:
+							tm.header.len = INT_LEN + TOPIC_LEN + 1;
+							break;
+						default:
+							break;
+					}
+					// copiaza datele in mesajul nou
+					memcpy(&(tm.topic), &(m.topic), TOPIC_LEN);
+					tm.data_type = m.data_type;
+					memcpy(&(tm.payload), &(m.payload), MAX_PAYLOAD_SIZE);
+					size = tm.header.len + sizeof(struct sockaddr_in) + sizeof(int);
+					follower *subs = getSubscribers(tdb, m.topic);
+					j = getSubscribersCount(tdb, m.topic) - 1;
+					for (; j >= 0; j--) {
+						if (isClientOnline(clients, subs[j].id)) {
+							// daca este online, trimite mesajul acum
+							n = send(getClientFD(clients, subs[j].id), &tm, size, 0);
+							DIE(n < 0, "send");
+						} else {
+							// daca nu este online, verifica daca are SF pentru acest topic
+							if (subs[j].SF) {
+								// salveaza mesajul daca clientul are SF activat pentru acest topic
+								storeMessage(clients, subs[j].id, &tm);
+							}
+						}
+					}
+
 				} else {
 					if (FD_ISSET(i, &tmp_fds)) {
 						// s-au primit date pe unul din socketii de client TCP
@@ -140,14 +200,13 @@ int main(int argc, char const *argv[])
 
 						if (n == 0) {
 							// conexiunea s-a inchis
-							printf("Client %s disconnected.\n", client[i]);
+							printf("Client %s disconnected.\n", getClientId(clients, i));
 							logoutClient(clients, i);
 							close(i);
 							// se scoate din multimea de citire socketul inchis 
 							FD_CLR(i, &read_fds);
 						} else {
 							// am primit un mesaj de tip subscribe/unsubscribe de la un utilizator
-							char out[70];
 							memset(buffer, 0, BUFLEN);
 							strcpy(buffer, "ok");
 							if (sm.subscribe) {
@@ -155,23 +214,22 @@ int main(int argc, char const *argv[])
 								if (ret < 0) {
 									strcpy(buffer, "ex");
 								}
-								strcpy(out, "subscibed to ");
 							} else {
 								ret = unsubscribe(tdb, sm.topic, getClientId(clients, i));
 								if (ret < 0) {
 									strcpy(buffer, "nex");
 								}
-								strcpy(out, "ubsubscribed from ");
 							}
-							n = send(newsockfd, buffer, BUFLEN, 0);
-							strcat(out, sm.topic);
-							printf ("%s (fd = %d) %s\n", getClientId(clients, i), i, out);
+							// trimite mesaj de feedback cu rezultatul operatiei
+							n = send(i, buffer, BUFLEN, 0);
 						}
 					}
 				}
 			}
 		}
 	}
-
+	// elibereaza memoria alocata dinamic
+	destroyCliList(clients);
+	destroyTDB(tdb);
 	return 0;
 }
